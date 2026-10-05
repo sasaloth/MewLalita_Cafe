@@ -222,43 +222,50 @@ var PCOL=[[0,1,2],[3,4,5]];
 function buildPhotos(){PCOL.forEach(function(c,ci){$(ci?'phR':'phL').innerHTML=c.map(function(k,j){var p=PHOTOS[k],wide=p.w>p.h;return '<button class="frame'+(wide?' wide':'')+'" data-ph="'+k+'" style="--r:'+((j+ci)%2?1:-1)*(1+j)+'deg;--ar:'+p.w+'/'+p.h+'" aria-label="ดูรูป"><img src="'+p.s+'" alt="ภาพถ่าย"></button>'}).join('')})}
 document.addEventListener('click',function(e){var f=e.target.closest('.frame');if(f){$('phBig').src=PHOTOS[+f.dataset.ph].s;open('oPhoto')}});
 
-/* ---------- โน้ต ---------- */
+/* ---------- โน้ต: Supabase + Realtime ---------- */
 var SUPABASE_URL='https://bnqqwfscuwusgmxorllk.supabase.co';
 var SUPABASE_KEY='sb_publishable_XgwXcnnhWCu59UgQ32tB-g_NroZ_bAT';
-var supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
-var noteUid=ls('mld-note-uid');
-if(!noteUid){noteUid='note_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,10);ls('mld-note-uid',noteUid)}
-function noteCanEdit(n){return !!n&&String(n.owner_id||'')===String(noteUid)}
+var sbClient=null;
+var localOwnerId=ls('mld-owner-id');
+if(!localOwnerId){localOwnerId=(crypto&&crypto.randomUUID)?crypto.randomUUID():'owner-'+Date.now()+'-'+Math.random().toString(36).slice(2);ls('mld-owner-id',localOwnerId)}
+function noteCanEdit(n){return !n.uid||n.uid===localOwnerId||n.uid===uid||canMod}
 function render(){
  $('cnt').textContent=notes.length;
  $('notes').innerHTML=notes.length?notes.slice(0,60).map(function(n,i){var h=hash(String(n.id));return '<button class="note" data-id="'+esc(n.id)+'" style="background:'+n.c+';--r:'+(((h%100)/10-5).toFixed(1))+'deg;animation-delay:'+(i*40)+'ms">'+esc(String(n.t).slice(0,60))+'<b>— '+esc(n.n)+'</b></button>'}).join(''):'<div style="align-self:center;opacity:.8">ยังไม่มีโน้ต เป็นคนแรกเลยนะ 🎀</div>';
- $('listBox').innerHTML=notes.length?notes.map(function(n){return '<div class="li" data-id="'+esc(n.id)+'" style="background:'+n.c+'">'+esc(n.t)+'<br><b>— '+esc(n.n)+'</b>'+(noteCanEdit(n)?'<br><button class="chip" data-edit="'+esc(n.id)+'">✏️ แก้ไข</button><button class="chip" data-del="'+esc(n.id)+'">🗑 ลบ</button>':'')+'</div>'}).join(''):'ยังไม่มีโน้ต เป็นคนแรกเลยนะ 🎀'}
+ $('listBox').innerHTML=notes.length?notes.map(function(n){return '<div class="li" data-id="'+esc(n.id)+'" style="background:'+n.c+'">'+esc(n.t)+'<br><b>— '+esc(n.n)+'</b>'+(noteCanEdit(n)?'<br><button class="chip" data-edit="'+esc(n.id)+'">✏️ แก้ไข</button><button class="chip" data-del="'+esc(n.id)+'">🗑 ลบ</button>':'')+'</div>'}).join(''):'ยังไม่มีโน้ต เป็นคนแรกเลยนะ 🎀'
+}
 function byId(id){return notes.filter(function(x){return String(x.id)==String(id)})[0]}
-function show(n){$('rWho').textContent='จาก '+n.n;$('rTxt').textContent=n.t;$('rTxt').style.backgroundColor=n.c;
- $('rAct').innerHTML=noteCanEdit(n)?'<button class="btn" data-edit="'+esc(n.id)+'">✏️ แก้ไข</button> <button class="btn alt" data-del="'+esc(n.id)+'">🗑 ลบ</button>':'';open('oRead')}
+function show(n){$('rWho').textContent='จาก '+n.n;$('rTxt').textContent=n.t;$('rTxt').style.backgroundColor=n.c;$('rAct').innerHTML=noteCanEdit(n)?'<button class="btn" data-edit="'+esc(n.id)+'">✏️ แก้ไข</button> <button class="btn alt" data-del="'+esc(n.id)+'">🗑 ลบ</button>':'';open('oRead')}
 function acts(e){var eb=e.target.closest('[data-edit]');if(eb){beginEdit(eb.dataset.edit);return true}var xb=e.target.closest('[data-del]');if(xb){delNote(xb.dataset.del);return true}return false}
 $('rAct').onclick=acts;
 $('listBox').onclick=function(e){if(acts(e))return;var d=e.target.closest('.li');if(d){var n=byId(d.dataset.id);if(n)show(n)}};
 $('notes').onclick=function(e){var b=e.target.closest('.note');if(b){var n=byId(b.dataset.id);if(n)show(n)}};
 function beginEdit(id){var n=byId(id);if(!n||!noteCanEdit(n))return;editingId=n.id;$('nm').value=n.n||'';$('tx').value=n.t||'';setColor(n.c||COLORS[0]);$('post').textContent='บันทึกการแก้ไข 💾';closeAll();open('oWrite')}
-async function addNoteRemote(n){
- var row={name:n.n,message:n.t,color:n.c,owner_id:noteUid,created_at:new Date(n.ts||Date.now()).toISOString()};
- var r=await supabaseClient.from('notes').insert(row).select().single();
- if(r.error)throw r.error;
- return r.data;
+function noteRowToUI(row){return{id:String(row.id),t:row.message||'',n:row.name||'แฟนคลับ',c:COLORS.indexOf(row.color)>=0?row.color:COLORS[0],ts:new Date(row.created_at||Date.now()).getTime(),uid:row.owner_id||''}}
+async function loadNotes(){
+ if(!sbClient)return;
+ var res=await sbClient.from('notes').select('id,name,message,color,owner_id,created_at').order('created_at',{ascending:false}).limit(100);
+ if(res.error)throw res.error;
+ notes=(res.data||[]).map(noteRowToUI);render();
 }
-async function updateNoteRemote(n){
- var r=await supabaseClient.from('notes').update({name:n.n,message:n.t,color:n.c}).eq('id',n.id).eq('owner_id',noteUid).select().single();
- if(r.error)throw r.error;
- return r.data;
+async function addNote(n){
+ if(!sbClient)throw new Error('Supabase ยังไม่พร้อม');
+ var res=await sbClient.from('notes').insert({name:n.n||'แฟนคลับ',message:n.t,color:n.c||COLORS[0],owner_id:localOwnerId}).select().single();
+ if(res.error)throw res.error;
+ return res.data;
 }
-async function deleteNoteRemote(id){
- var r=await supabaseClient.from('notes').delete().eq('id',id).eq('owner_id',noteUid);
- if(r.error)throw r.error;
+async function updateNote(n){
+ var res=await sbClient.from('notes').update({name:n.n||'แฟนคลับ',message:n.t,color:n.c||COLORS[0]}).eq('id',Number(n.id)).eq('owner_id',n.uid||localOwnerId).select().single();
+ if(res.error)throw res.error;
+ return res.data;
 }
-function remoteToNote(r){return{id:r.id,t:r.message,n:r.name,c:COLORS.indexOf(r.color)>=0?r.color:COLORS[0],ts:new Date(r.created_at).getTime(),owner_id:r.owner_id}}
-function delNote(id){var n=byId(id);if(!n||!noteCanEdit(n))return;if(!confirm('ลบโน้ตนี้ใช่ไหม?'))return;
- deleteNoteRemote(n.id).then(function(){notes=notes.filter(function(x){return String(x.id)!=String(id)});closeAll();render();toast('ลบโน้ตแล้ว')}).catch(function(){toast('ลบไม่สำเร็จ ลองอีกครั้งนะ')})}
+async function deleteNote(n){
+ var res=await sbClient.from('notes').delete().eq('id',Number(n.id)).eq('owner_id',n.uid||localOwnerId);
+ if(res.error)throw res.error;
+}
+function delNote(id){var n=byId(id);if(!n)return;if(!confirm('ลบโน้ตนี้ใช่ไหม?'))return;
+ if(!sbClient){toast('ระบบโน้ตยังเชื่อมต่อไม่สำเร็จ ลองรีเฟรชหน้าอีกครั้งนะ');return}
+ deleteNote(n).then(function(){closeAll();toast('ลบโน้ตแล้ว');return loadNotes()}).catch(function(){toast('ลบไม่สำเร็จ ลองอีกครั้งนะ')})}
 function setColor(c){color=c;$('paper').style.backgroundColor=c;[].forEach.call($('sw').children,function(b){b.classList.toggle('on',b.dataset.c==c)})}
 $('sw').innerHTML=COLORS.map(function(c){return '<button data-c="'+c+'" style="background:'+c+'" aria-label="สี"></button>'}).join('');
 $('sw').onclick=function(e){var b=e.target.closest('button');if(b)setColor(b.dataset.c)};setColor(COLORS[0]);
@@ -268,50 +275,40 @@ $('cake').onclick=function(){if(blowing)return;blowing=true;var fl=document.quer
  setTimeout(function(){editingId=null;$('post').textContent='ส่งโน้ตขึ้นกำแพง ✨';$('tx').value='';$('nm').value=myName||$('nm').value||'';confetti();open('oWrite')},fl.length*250+150);
  setTimeout(function(){fl.forEach(function(f){f.classList.remove('off')});blowing=false},4500)};
 $('bList').onclick=function(){open('oList')};
-async function saveMe(item){if(!col||!uid||!canWrite)return;var d=col.doc(uid),sn=await d.get(),items=((sn.exists&&sn.data().items)||[]).slice();
- if(item){items.unshift(item);items=items.slice(0,30)}
- await d.set({items:items,cat:cat,seat:seat,name:myName,seenAt:Date.now()})}
-function saveLocal(n){var l=ls('mld-v2')||[];l.unshift(n);ls('mld-v2',l);notes.unshift(n);render()}
+/* ระบบโต๊ะเดิมคงไว้: ใช้ backend เดิมเฉพาะข้อมูลโต๊ะ/คน */
+async function saveMe(item){if(!col||!uid||!canWrite)return;var d=col.doc(uid),sn=await d.get(),items=((sn.exists&&sn.data().items)||[]).slice();if(item){items.unshift(item);items=items.slice(0,30)}await d.set({items:items,cat:cat,seat:seat,name:myName,seenAt:Date.now()})}
 $('post').onclick=async function(){
- var t=$('tx').value.trim();if(!t){$('tx').focus();return}
+ var btn=$('post'),t=$('tx').value.trim();if(!t){$('tx').focus();return}
  var nm=$('nm').value.trim()||'แฟนคลับ';
- if(editingId){
-  var old=byId(editingId);if(!old||!noteCanEdit(old))return;
-  var n2={id:old.id,t:t,n:nm,c:color,ts:Date.now(),owner_id:noteUid};
-  try{await updateNoteRemote(n2);editingId=null;$('post').textContent='ส่งโน้ตขึ้นกำแพง ✨';$('tx').value='';closeAll();toast('แก้ไขโน้ตแล้ว 💖')}catch(e){toast('แก้ไขไม่สำเร็จ ลองอีกครั้งนะ')}
-  return;
- }
- var n={t:t,n:nm,c:color,ts:Date.now()};
- $('tx').value='';closeAll();confetti();
- try{await addNoteRemote(n);toast('โน้ตของคุณขึ้นกำแพงแล้ว 💖 ทุกคนเห็นนะ')}
- catch(e){toast('ส่งโน้ตไม่สำเร็จ ลองอีกครั้งนะ')}
+ btn.disabled=true;btn.textContent='กำลังส่ง... 💌';
+ try{
+  if(editingId){var old=byId(editingId);if(!old)throw new Error('ไม่พบโน้ต');if(!noteCanEdit(old))throw new Error('ไม่มีสิทธิ์');var n2={id:old.id,t:t,n:nm,c:color,ts:Date.now(),uid:old.uid};await updateNote(n2);editingId=null;toast('แก้ไขโน้ตแล้ว 💖')}
+  else{var n={id:'',t:t,n:nm,c:color,ts:Date.now(),uid:localOwnerId};await addNote(n);confetti();toast('โน้ตของคุณขึ้นกำแพงแล้ว 💖 ทุกคนเห็นนะ')}
+  $('tx').value='';$('post').textContent='ส่งโน้ตขึ้นกำแพง ✨';closeAll();await loadNotes();
+ }catch(e){console.error('Note save error:',e);toast('ส่งไม่สำเร็จ ลองใหม่อีกครั้งนะ');}
+ finally{btn.disabled=false;if(!editingId)btn.textContent='ส่งโน้ตขึ้นกำแพง ✨'}
 };
 
 /* ---------- เริ่มต้น + ซิงก์ข้อมูลร่วมกัน ---------- */
 $('who').value=ls('mld-name')||'';
 buildPhotos();buildTables();drawCat();go(1);
 notes=[];render();
-(async function(){
+/* Supabase สำหรับกำแพงโน้ต */
+(function(){
  try{
-  var r=await supabaseClient.from('notes').select('*').order('created_at',{ascending:false}).limit(100);
-  if(r.error)throw r.error;
-  notes=(r.data||[]).map(remoteToNote);render();
-  supabaseClient.channel('mew-notes-realtime')
-   .on('postgres_changes',{event:'*',schema:'public',table:'notes'},function(payload){
-    if(payload.eventType==='INSERT'){var n=remoteToNote(payload.new);if(!byId(n.id)){notes.unshift(n);notes.sort(function(a,b){return b.ts-a.ts});notes=notes.slice(0,100);render()}}
-    else if(payload.eventType==='UPDATE'){var u=remoteToNote(payload.new);notes=notes.map(function(x){return String(x.id)===String(u.id)?u:x});render()}
-    else if(payload.eventType==='DELETE'){notes=notes.filter(function(x){return String(x.id)!==String(payload.old.id)});render()}
-   }).subscribe();
- }catch(e){console.warn('Supabase notes:',e)}
+  if(window.supabase&&window.supabase.createClient){
+   sbClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+   loadNotes().catch(function(e){console.error('โหลดโน้ตไม่สำเร็จ',e);toast('โหลดกำแพงโน้ตไม่สำเร็จ ลองรีเฟรชนะ')});
+   sbClient.channel('mew-notes-realtime').on('postgres_changes',{event:'*',schema:'public',table:'notes'},function(){loadNotes().catch(console.error)}).subscribe();
+  }else{toast('ระบบโน้ตยังไม่พร้อม กรุณารีเฟรชหน้าอีกครั้งนะ')}
+ }catch(e){console.error(e);}
 })();
+/* backend เดิมสำหรับโต๊ะ/สถานะคน ยังคงไว้เพื่อไม่กระทบฟังก์ชันอื่น */
 (async function(){try{
  var db=await window.claude.use('db');usr=await window.claude.use('user');if(!db)return;
  if(usr){try{uid=await usr.id();canMod=!!(await usr.canEdit());canWrite=(await usr.can('data.write'))!==false}catch(e){}}
  col=db.collection('wall');
- col.limit(200).onSnapshot(function(s){people=[];
-  s.docs.forEach(function(d){var v=d.data()||{};
-   if(v.cat&&Number.isInteger(v.seat)&&v.seat>=0&&v.seat<4&&Date.now()-v.seenAt<10800000)people.push({uid:d.id,cat:okCat(v.cat),seat:v.seat,name:v.name})});
-  buildTables()},function(){});
+ col.limit(200).onSnapshot(function(s){var allPeople=[];people=[];s.docs.forEach(function(d){var v=d.data()||{};if(v.cat&&Number.isInteger(v.seat)&&v.seat>=0&&v.seat<4&&Date.now()-v.seenAt<10800000)people.push({uid:d.id,cat:okCat(v.cat),seat:v.seat,name:v.name})});buildTables()},function(){});
  if(entered)saveMe().catch(function(){});
 }catch(e){}})();
 </script>
